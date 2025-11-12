@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import './App.css';
+import useTurnTimer from './hooks/useTurnTimer';
 
 /**
  * PUBLIC_INTERFACE
@@ -72,11 +73,22 @@ function calculateWinner(squares) {
 }
 
 /**
+ * Level configuration with seconds per turn.
+ */
+const LEVELS = {
+  Easy: 30,
+  Medium: 15,
+  Hard: 7,
+};
+const LEVEL_STORAGE_KEY = 'ttt.level';
+
+/**
  * PUBLIC_INTERFACE
  * App is the main component for the Tic Tac Toe game.
  * - Tracks history for undo/jump-to-move
  * - Shows current player, winner, draw state
  * - Ocean Professional styled UI
+ * - Adds level-based per-turn timer with forfeit on timeout
  */
 function App() {
   // Theme support (optional; kept minimal)
@@ -85,6 +97,18 @@ function App() {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  // Load level from localStorage (default Medium)
+  const initialLevel = useMemo(() => {
+    try {
+      const stored = window.localStorage.getItem(LEVEL_STORAGE_KEY);
+      if (stored && LEVELS[stored]) return stored;
+    } catch (e) {
+      // ignore storage errors
+    }
+    return 'Medium';
+  }, []);
+  const [level, setLevel] = useState(initialLevel);
+
   const [history, setHistory] = useState([Array(9).fill(null)]);
   const [step, setStep] = useState(0);
   const [xIsNext, setXIsNext] = useState(true);
@@ -92,38 +116,134 @@ function App() {
   const current = history[step];
   const { winner, line: winningLine } = useMemo(() => calculateWinner(current), [current]);
   const isDraw = useMemo(() => !winner && current.every(Boolean), [winner, current]);
+  const gameOver = !!winner || isDraw;
 
+  const levelSeconds = LEVELS[level];
+
+  // Timeout handler: forfeit current turn (no move), switch player and reset the timer
+  const onTimeout = useCallback(() => {
+    if (gameOver) return; // do nothing if game finished
+    setXIsNext((prev) => !prev);
+    // Timer reset handled below using effect + timer.reset when xIsNext changes
+  }, [gameOver]);
+
+  // Hook: per-turn timer, active only when game is not over
+  const { timeLeft, reset: resetTimer, pause: pauseTimer, resume: resumeTimer } = useTurnTimer(
+    levelSeconds,
+    !gameOver, // timer runs while game active
+    onTimeout
+  );
+
+  // Persist level selection
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LEVEL_STORAGE_KEY, level);
+    } catch (e) {
+      // ignore storage errors
+    }
+  }, [level]);
+
+  // Compose status text
   const statusText = useMemo(() => {
     if (winner) return `Winner: ${winner}`;
     if (isDraw) return 'Draw';
     return `Turn: ${xIsNext ? 'X' : 'O'}`;
   }, [winner, isDraw, xIsNext]);
 
-  const handleSquareClick = useCallback((index) => {
-    if (winner || current[index] || isDraw) return;
+  // Color phase based on timeLeft percentage for badge
+  const timePct = useMemo(() => {
+    const t = Math.max(0, Math.min(1, timeLeft / (levelSeconds || 1)));
+    return t;
+  }, [timeLeft, levelSeconds]);
 
-    const next = current.slice();
-    next[index] = xIsNext ? 'X' : 'O';
+  const timeBadgeClass = useMemo(() => {
+    if (timePct <= 0.25) return 'time-badge danger';
+    if (timePct <= 0.5) return 'time-badge warn';
+    return 'time-badge ok';
+  }, [timePct]);
 
-    // Update history to current step (support undo)
-    const nextHistory = history.slice(0, step + 1).concat([next]);
-    setHistory(nextHistory);
-    setStep(step + 1);
-    setXIsNext(!xIsNext);
-  }, [winner, current, isDraw, xIsNext, history, step]);
+  // Handle a square click: place mark, update history, check winner/draw via derived state,
+  // then switch player and reset timer if game continues.
+  const handleSquareClick = useCallback(
+    (index) => {
+      if (winner || current[index] || isDraw) return;
+
+      const next = current.slice();
+      next[index] = xIsNext ? 'X' : 'O';
+
+      // Update history to current step (support undo)
+      const nextHistory = history.slice(0, step + 1).concat([next]);
+      setHistory(nextHistory);
+      setStep(step + 1);
+
+      // After move, check if game would be over. We can compute here quickly:
+      const { winner: nextWinner } = calculateWinner(next);
+      const nextIsDraw = !nextWinner && next.every(Boolean);
+
+      if (nextWinner || nextIsDraw) {
+        // game ends -> pause timer
+        pauseTimer();
+      } else {
+        // Switch player and reset timer for the next player
+        setXIsNext(!xIsNext);
+        resetTimer(levelSeconds);
+      }
+    },
+    [winner, current, isDraw, xIsNext, history, step, pauseTimer, resetTimer, levelSeconds]
+  );
 
   // PUBLIC_INTERFACE
   const resetGame = useCallback(() => {
+    // Keep selected level; reset board and state
     setHistory([Array(9).fill(null)]);
     setStep(0);
     setXIsNext(true);
-  }, []);
+    // Reset timer for starting player
+    resetTimer(levelSeconds);
+    resumeTimer();
+  }, [levelSeconds, resetTimer, resumeTimer]);
 
   // PUBLIC_INTERFACE
   const jumpTo = useCallback((moveIndex) => {
     setStep(moveIndex);
     // X starts at move 0; turn parity determines next player
-    setXIsNext(moveIndex % 2 === 0);
+    const nextXIsNext = moveIndex % 2 === 0;
+    setXIsNext(nextXIsNext);
+    // If game not over at that state, reset timer to full for that player's new turn
+    // Determine board at moveIndex
+    // We'll compute winner/draw from history after render, but we can optimistically reset now.
+    resetTimer(levelSeconds);
+    if (!gameOver) {
+      resumeTimer();
+    }
+  }, [levelSeconds, resetTimer, resumeTimer, gameOver]);
+
+  // When level changes, reset timer to full for the current player (if game active)
+  useEffect(() => {
+    if (!gameOver) {
+      resetTimer(levelSeconds);
+      resumeTimer();
+    } else {
+      pauseTimer();
+    }
+  }, [levelSeconds, gameOver, resetTimer, resumeTimer, pauseTimer]);
+
+  // Pause timer when gameOver changes to true; resume when becomes false
+  useEffect(() => {
+    if (gameOver) {
+      pauseTimer();
+    } else {
+      resumeTimer();
+    }
+  }, [gameOver, pauseTimer, resumeTimer]);
+
+  // Level selector handler
+  const handleLevelChange = useCallback((e) => {
+    const nextLevel = e.target.value;
+    if (LEVELS[nextLevel]) {
+      setLevel(nextLevel);
+      // Timer reset is managed by effect on levelSeconds
+    }
   }, []);
 
   return (
@@ -135,9 +255,57 @@ function App() {
           <p className="subtitle">Two players on the same device</p>
         </header>
 
+        {/* Level Selector */}
+        <section className="status-card" aria-label="Level selection">
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <label htmlFor="level" style={{ fontWeight: 600, color: '#374151' }}>Level</label>
+            <select
+              id="level"
+              aria-label="Select difficulty level"
+              value={level}
+              onChange={handleLevelChange}
+              className="btn"
+              style={{
+                borderRadius: 12,
+                padding: '8px 12px',
+                borderColor: 'rgba(17,24,39,0.1)',
+                background: 'var(--surface)',
+                cursor: 'pointer',
+              }}
+            >
+              {Object.keys(LEVELS).map((k) => (
+                <option key={k} value={k}>{k} ({LEVELS[k]}s/turn)</option>
+              ))}
+            </select>
+          </div>
+        </section>
+
         <section className="status-card" aria-live="polite">
-          <div className={`status-badge ${winner ? 'win' : isDraw ? 'draw' : xIsNext ? 'x' : 'o'}`}>
+          <div className={`status-badge ${winner ? 'win' : isDraw ? 'draw' : xIsNext ? 'x' : 'o'}`} style={{ gap: 10 }}>
             {statusText}
+            {!gameOver && (
+              <span
+                className={timeBadgeClass}
+                role="status"
+                aria-live="polite"
+                aria-label={`Time left: ${timeLeft} seconds`}
+                style={{
+                  marginLeft: 10,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minWidth: 40,
+                  height: 28,
+                  padding: '0 10px',
+                  borderRadius: 999,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  transition: 'background-color 0.3s ease, color 0.3s ease',
+                }}
+              >
+                {timeLeft}s
+              </span>
+            )}
           </div>
         </section>
 
