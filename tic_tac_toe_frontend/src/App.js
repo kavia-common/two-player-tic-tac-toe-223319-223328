@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import './App.css';
 import useTurnTimer from './hooks/useTurnTimer';
 
@@ -81,6 +81,7 @@ const LEVELS = {
   Hard: 7,
 };
 const LEVEL_STORAGE_KEY = 'ttt.level';
+const MUTE_STORAGE_KEY = 'ttt.soundMuted';
 
 /**
  * PUBLIC_INTERFACE
@@ -108,6 +109,19 @@ function App() {
     return 'Medium';
   }, []);
   const [level, setLevel] = useState(initialLevel);
+
+  // Mute preference from localStorage (default: unmuted false)
+  const initialMuted = useMemo(() => {
+    try {
+      const stored = window.localStorage.getItem(MUTE_STORAGE_KEY);
+      if (stored === 'true') return true;
+      if (stored === 'false') return false;
+    } catch (e) {
+      // ignore
+    }
+    return false;
+  }, []);
+  const [isMuted, setIsMuted] = useState(initialMuted);
 
   const [history, setHistory] = useState([Array(9).fill(null)]);
   const [step, setStep] = useState(0);
@@ -143,6 +157,15 @@ function App() {
     }
   }, [level]);
 
+  // Persist mute preference
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MUTE_STORAGE_KEY, String(isMuted));
+    } catch (e) {
+      // ignore
+    }
+  }, [isMuted]);
+
   // Compose status text
   const statusText = useMemo(() => {
     if (winner) return `Winner: ${winner}`;
@@ -161,6 +184,62 @@ function App() {
     if (timePct <= 0.5) return 'time-badge warn';
     return 'time-badge ok';
   }, [timePct]);
+
+  // Track one-time 5s alert per turn
+  const fiveSecAlertFiredRef = useRef(false);
+  const lastTurnKeyRef = useRef(null);
+
+  // Basic beep using Web Audio API (non-intrusive short blip)
+  const playBeep = useCallback(() => {
+    if (isMuted) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = 880; // A5 short beep
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.06, ctx.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start();
+      o.stop(ctx.currentTime + 0.14);
+      // Close context shortly after to avoid resource leaks
+      setTimeout(() => ctx.close(), 250);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('Beep not supported:', e);
+    }
+  }, [isMuted]);
+
+  // Derive a "turn key" to know when a new turn starts to reset alert
+  const turnKey = useMemo(() => {
+    // combine current player and step to represent a unique turn
+    return `${xIsNext ? 'X' : 'O'}-${step}`;
+  }, [xIsNext, step]);
+
+  // Reset the alert state whenever the turn changes or level changes or timer resets are expected
+  useEffect(() => {
+    if (lastTurnKeyRef.current !== turnKey) {
+      fiveSecAlertFiredRef.current = false;
+      lastTurnKeyRef.current = turnKey;
+    }
+  }, [turnKey]);
+
+  // Fire the 5s alert (one-time per turn). Only when timeLeft exactly hits 5.
+  useEffect(() => {
+    if (gameOver) return;
+    if (timeLeft === 5 && !fiveSecAlertFiredRef.current) {
+      fiveSecAlertFiredRef.current = true;
+      // visual cue handled via adding 'pulse' class conditionally
+      playBeep();
+    }
+    // If timer was reset to full (>5), ensure we can fire again later in this new turn
+    if (timeLeft > 5 && fiveSecAlertFiredRef.current && lastTurnKeyRef.current === turnKey) {
+      // do nothing; keep as fired for this very same turn
+    }
+  }, [timeLeft, gameOver, playBeep, turnKey]);
 
   // Handle a square click: place mark, update history, check winner/draw via derived state,
   // then switch player and reset timer if game continues.
@@ -285,7 +364,7 @@ function App() {
             {statusText}
             {!gameOver && (
               <span
-                className={timeBadgeClass}
+                className={`${timeBadgeClass} ${(timeLeft <= 5 && fiveSecAlertFiredRef.current) ? 'pulse' : ''}`}
                 role="status"
                 aria-live="polite"
                 aria-label={`Time left: ${timeLeft} seconds`}
@@ -327,6 +406,20 @@ function App() {
           >
             Reset
           </button>
+        </section>
+
+        {/* Settings (sound) */}
+        <section className="settings" aria-label="Settings">
+          <label className="toggle" htmlFor="mute-sound">
+            <input
+              id="mute-sound"
+              type="checkbox"
+              checked={isMuted}
+              onChange={(e) => setIsMuted(e.target.checked)}
+              aria-label="Mute 5-second alert sound"
+            />
+            <span>{isMuted ? 'Sound muted' : 'Sound on'}</span>
+          </label>
         </section>
 
         <section className="history" aria-label="Move history">
