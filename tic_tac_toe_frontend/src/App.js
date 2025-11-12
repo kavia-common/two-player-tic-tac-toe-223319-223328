@@ -232,6 +232,7 @@ function App() {
   useEffect(() => {
     if (!gameOver) {
       resetTimer(levelSeconds);
+      // resume is safe; hook effect will ensure a single interval
       resumeTimer();
     } else {
       pauseTimer();
