@@ -227,6 +227,17 @@ function App() {
     }
   }, [turnKey]);
 
+  // When a new turn starts (turnKey changes) and the game is active,
+  // ensure the timer is reset for the new player. This also covers timeout-driven turn switches.
+  useEffect(() => {
+    if (!gameOver) {
+      resetTimer(levelSeconds);
+      resumeTimer();
+    } else {
+      pauseTimer();
+    }
+  }, [turnKey, gameOver, levelSeconds, resetTimer, resumeTimer, pauseTimer]);
+
   // Fire the 5s alert (one-time per turn). Only when timeLeft exactly hits 5.
   useEffect(() => {
     if (gameOver) return;

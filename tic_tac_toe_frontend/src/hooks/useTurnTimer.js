@@ -14,13 +14,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * - pause, resume: control ticking without destroying the state
  */
 export function useTurnTimer(totalSeconds, isActive, onTimeout) {
+  // initialize the time left
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.floor(totalSeconds || 0)));
+
+  // refs to avoid stale closures and track interval
   const intervalRef = useRef(null);
   const latestTimeoutRef = useRef(onTimeout);
   const latestActiveRef = useRef(isActive);
   const latestTotalRef = useRef(totalSeconds);
 
-  // keep refs up to date to avoid stale closures
+  // keep refs updated
   useEffect(() => {
     latestTimeoutRef.current = onTimeout;
   }, [onTimeout]);
@@ -33,6 +36,7 @@ export function useTurnTimer(totalSeconds, isActive, onTimeout) {
     latestTotalRef.current = totalSeconds;
   }, [totalSeconds]);
 
+  // clear helper
   const clear = useCallback(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
@@ -40,18 +44,17 @@ export function useTurnTimer(totalSeconds, isActive, onTimeout) {
     }
   }, []);
 
+  // tick logic - decrease once per second and fire timeout at zero
   const tick = useCallback(() => {
     setTimeLeft((prev) => {
       if (prev <= 1) {
-        // will hit zero -> stop and fire timeout
+        // stopping at zero
         clear();
-        // use ref to avoid stale onTimeout
+        // only notify if still active (not paused/game over)
         if (latestActiveRef.current) {
-          // only trigger timeout if still active
           try {
             latestTimeoutRef.current && latestTimeoutRef.current();
           } catch (e) {
-            // swallow to avoid breaking render cycles
             // eslint-disable-next-line no-console
             console.error('Timer onTimeout error:', e);
           }
@@ -62,57 +65,67 @@ export function useTurnTimer(totalSeconds, isActive, onTimeout) {
     });
   }, [clear]);
 
+  // start ticking if active
   const start = useCallback(() => {
     clear();
-    if (latestActiveRef.current && latestTotalRef.current > 0) {
+    if (latestActiveRef.current && (latestTotalRef.current ?? 0) > 0) {
       intervalRef.current = setInterval(tick, 1000);
     }
   }, [tick, clear]);
 
+  // PUBLIC_INTERFACE
   const reset = useCallback(
     (nextTotalSeconds) => {
-      clear();
+      // Reset to provided or last total
       const next = Math.max(0, Math.floor(nextTotalSeconds ?? latestTotalRef.current ?? 0));
       setTimeLeft(next);
+      // restart interval when active
+      clear();
       if (latestActiveRef.current && next > 0) {
         intervalRef.current = setInterval(tick, 1000);
       }
     },
-    [clear, tick]
+    [tick, clear]
   );
 
+  // PUBLIC_INTERFACE
   const pause = useCallback(() => {
     clear();
   }, [clear]);
 
+  // PUBLIC_INTERFACE
   const resume = useCallback(() => {
-    if (!intervalRef.current && latestActiveRef.current && timeLeft > 0) {
+    // do not depend on timeLeft here to avoid missing resume under StrictMode
+    if (!intervalRef.current && latestActiveRef.current && (latestTotalRef.current ?? 0) > 0 && timeLeft > 0) {
       intervalRef.current = setInterval(tick, 1000);
     }
   }, [tick, timeLeft]);
 
-  // React to isActive changes
+  // Effect: set up interval whenever active state toggles
   useEffect(() => {
     if (isActive) {
-      // ensure ticking resumes
-      resume();
+      // ensure an interval exists
+      clear();
+      intervalRef.current = setInterval(tick, 1000);
     } else {
-      // pause when not active
-      pause();
+      clear();
     }
-  }, [isActive, pause, resume]);
+    return () => {
+      // cleanup on dep change to avoid multiple intervals (StrictMode safe)
+      clear();
+    };
+  }, [isActive, tick, clear]);
 
-  // Reset internal state if totalSeconds changes meaningfully (level change)
+  // Effect: when totalSeconds changes (e.g., level change), reset to new total and restart if active
   useEffect(() => {
-    setTimeLeft(Math.max(0, Math.floor(totalSeconds || 0)));
-    // restart ticking if active
-    if (isActive) {
-      reset(totalSeconds);
-    } else {
-      pause();
+    const next = Math.max(0, Math.floor(totalSeconds || 0));
+    setTimeLeft(next);
+    clear();
+    if (isActive && next > 0) {
+      intervalRef.current = setInterval(tick, 1000);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalSeconds]);
+    // cleanup is handled by the effect's return in the isActive effect
+  }, [totalSeconds, isActive, tick, clear]);
 
   // Cleanup on unmount
   useEffect(() => {
